@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+
+# Umgebungsvariablen / Secrets
+.env
+.env.local
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Streamlit
+.streamlit/secrets.toml
+
+
+cat > README.md << 'EOF'
+# Trading Dashboard
+
+
+cat > .gitignore << 'EOF'
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+
+# Umgebungsvariablen / Secrets
+.env
+.env.local
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Daten lokal halten? Vorerst NEIN, damit GitHub die CSVs versionieren kann.
+# Falls die Dateien später zu groß werden, hier ergänzen:
+# data/raw/*.csv
