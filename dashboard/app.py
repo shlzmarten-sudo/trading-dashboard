@@ -1,9 +1,16 @@
 """
-Trading Dashboard - Phase 5.1/5.2
+Trading Dashboard - Phase 5.3 (final)
+Features:
+  - Cockpit (Übersicht aller 10 Märkte mit Bias-Ampel)
+  - COT, Saisonalität, Zinsen (jeweils eigene Tabs)
+  - Watchlist + Notizen pro Markt (persistent in JSON)
+  - Refresh-Button, Datenalter-Warnungen
+  - Bias-Score nach 4-Säulen-Framework
 """
 
 from __future__ import annotations
-from datetime import datetime
+import json
+from datetime import datetime, timedelta
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -12,6 +19,9 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 
+# -------------------------------------------------
+# Seite
+# -------------------------------------------------
 st.set_page_config(
     page_title="Trading Dashboard",
     page_icon="📊",
@@ -19,6 +29,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# -------------------------------------------------
+# Globales CSS
+# -------------------------------------------------
 st.markdown("""
 <style>
 .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
@@ -35,6 +48,7 @@ button[data-baseweb="tab"] {
     padding-top: 0.7rem; padding-bottom: 0.7rem;
 }
 section[data-testid="stSidebar"] { border-right: 1px solid #1f2430; }
+
 .cockpit-card {
     background: #161A23; border: 1px solid #1f2430;
     border-radius: 8px; padding: 12px 14px; margin-bottom: 8px;
@@ -51,18 +65,32 @@ section[data-testid="stSidebar"] { border-right: 1px solid #1f2430; }
 }
 .cockpit-row {
     display: flex; justify-content: space-between; align-items: baseline;
-    margin-top: 8px; font-size: 0.82rem;
+    margin-top: 6px; font-size: 0.82rem;
 }
 .cockpit-row .lbl {
     color: #9aa0ad; text-transform: uppercase;
     letter-spacing: 0.8px; font-size: 0.7rem;
 }
-.cockpit-row .val {
-    font-family: ui-monospace, monospace; font-weight: 600;
-}
+.cockpit-row .val { font-family: ui-monospace, monospace; font-weight: 600; }
 .cot-low  { color: #4ADE80; }
 .cot-high { color: #F87171; }
 .cot-mid  { color: #E6E8EE; }
+
+.bias-pill {
+    display: inline-block; padding: 2px 10px; border-radius: 12px;
+    font-family: ui-monospace, monospace; font-weight: 700; font-size: 0.78rem;
+    letter-spacing: 1px;
+}
+.bias-bull-strong { background: rgba(74,222,128,0.20); color: #4ADE80; border: 1px solid #4ADE80; }
+.bias-bull        { background: rgba(74,222,128,0.10); color: #86EFAC; }
+.bias-neutral     { background: rgba(154,160,173,0.10); color: #9aa0ad; }
+.bias-bear        { background: rgba(248,113,113,0.10); color: #FCA5A5; }
+.bias-bear-strong { background: rgba(248,113,113,0.20); color: #F87171; border: 1px solid #F87171; }
+.bias-na          { background: rgba(154,160,173,0.05); color: #6b7280; }
+
+.star { color: #FFB000; font-weight: 700; }
+.muted { color: #9aa0ad; }
+
 [data-testid="stDataFrame"] {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.86rem;
@@ -71,15 +99,26 @@ section[data-testid="stSidebar"] { border-right: 1px solid #1f2430; }
     color: #9aa0ad; font-size: 0.78rem;
     letter-spacing: 0.5px; margin-top: -4px;
 }
+.warn-stale {
+    background: rgba(248,113,113,0.10);
+    border-left: 3px solid #F87171;
+    padding: 6px 10px; border-radius: 4px;
+    color: #FCA5A5; font-size: 0.82rem; margin: 6px 0;
+}
 </style>
 """, unsafe_allow_html=True)
 
+
+# -------------------------------------------------
+# Pfade & Konstanten
+# -------------------------------------------------
 COT_PATH    = Path("data/processed/cot_metrics.parquet")
 SEAS_MONTH  = Path("data/processed/seasonality_monthly.parquet")
 SEAS_WEEK   = Path("data/processed/seasonality_weekly.parquet")
 SEAS_CURVE  = Path("data/processed/seasonality_curve.parquet")
 RATES_WIDE  = Path("data/processed/rates_wide.parquet")
 RATE_DIFFS  = Path("data/processed/rate_diffs.parquet")
+USER_STATE  = Path("data/processed/user_state.json")  # Watchlist + Notizen
 
 GROUP_CHOICES = {
     "Commercials":       "commercials",
@@ -92,6 +131,7 @@ MARKET_NAMES = {
     "GC": "Gold", "SI": "Silver", "CL": "WTI Crude Oil",
     "ES": "E-mini S&P 500", "NQ": "E-mini Nasdaq-100",
 }
+FX_SYMBOLS = {"6E", "6B", "6J", "6A", "6C"}
 FUTURE_TO_PAIR = {
     "6E": "EURUSD", "6B": "GBPUSD", "6J": "USDJPY",
     "6A": "AUDUSD", "6C": "USDCAD",
@@ -103,6 +143,25 @@ MONTH_NAMES_DE = ["Jan","Feb","Mär","Apr","Mai","Jun",
                   "Jul","Aug","Sep","Okt","Nov","Dez"]
 
 
+# -------------------------------------------------
+# Watchlist + Notizen (lokales JSON)
+# -------------------------------------------------
+def load_user_state() -> dict:
+    if USER_STATE.exists():
+        try:
+            return json.loads(USER_STATE.read_text())
+        except Exception:
+            pass
+    return {"watchlist": [], "notes": {}}
+
+def save_user_state(state: dict) -> None:
+    USER_STATE.parent.mkdir(parents=True, exist_ok=True)
+    USER_STATE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+
+
+# -------------------------------------------------
+# Daten-Loader
+# -------------------------------------------------
 @st.cache_data(ttl=600)
 def load_cot():
     if not COT_PATH.exists(): return pd.DataFrame()
@@ -127,11 +186,136 @@ def load_rates():
     return wide, diffs
 
 
+# -------------------------------------------------
+# Bias-Berechnung (4-Säulen-Framework)
+# -------------------------------------------------
+def score_cot(idx_26w: float) -> int:
+    """Score basiert nur auf Commercials (Smart Money).
+    Hohe Werte = Commercials kaufen Shorts zurück = bullish.
+    Niedrige Werte = Commercials hedgen maximal ab = bearish."""
+    if pd.isna(idx_26w): return 0
+    if idx_26w >= 90:  return +2   # extrem bullish
+    if idx_26w >= 75:  return +1   # leicht bullish
+    if idx_26w <= 10:  return -2   # extrem bearish
+    if idx_26w <= 25:  return -1   # leicht bearish
+    return 0                       # neutraler Bereich (26-74)
+
+def score_season(monthly_df: pd.DataFrame, weekly_df: pd.DataFrame, sym: str) -> int:
+    """Saison-Score: Monats-Komponente (max ±2) + KW-Komponente (max ±1),
+    gekappt auf [-2, +2]. KW-Komponente wird pro KW einzeln bewertet,
+    damit klare Signale einer einzelnen KW nicht durch die Mittelung untergehen."""
+    if monthly_df.empty: return 0
+    m = monthly_df[monthly_df["symbol"] == sym]
+    if m.empty: return 0
+    today = datetime.now()
+    cur_m  = today.month
+    next_m = (cur_m % 12) + 1
+    cur_kw = today.isocalendar().week
+
+    # --- Monats-Komponente (max ±2) ---
+    avg_cur = m[m["month"] == cur_m]["return_pct"].mean()
+    hit_cur = (m[m["month"] == cur_m]["return_pct"] > 0).mean() * 100.0
+    avg_nxt = m[m["month"] == next_m]["return_pct"].mean()
+    if pd.isna(avg_cur) or pd.isna(avg_nxt):
+        month_score = 0
+    elif avg_cur >= 1.5 and avg_nxt > 0 and hit_cur >= 65:
+        month_score = +2
+    elif avg_cur <= -1.5 and avg_nxt < 0 and hit_cur <= 35:
+        month_score = -2
+    elif avg_cur > 0 and avg_nxt > 0:
+        month_score = +1
+    elif avg_cur < 0 and avg_nxt < 0:
+        month_score = -1
+    else:
+        month_score = 0
+
+    # --- KW-Komponente (max ±1): aktuelle + nächste KW EINZELN bewerten ---
+    def _kw_score_single(kw: int) -> int:
+        sub = weekly_df[(weekly_df["symbol"] == sym) & (weekly_df["iso_week"] == kw)]["return_pct"]
+        if len(sub) < 8:  # mind. 8 Jahre Daten
+            return 0
+        avg = sub.mean()
+        hit = (sub > 0).mean() * 100.0
+        if avg >= 0.5 and hit >= 60:
+            return +1
+        if avg <= -0.5 and hit <= 40:
+            return -1
+        return 0
+
+    kw_score = 0
+    if not weekly_df.empty:
+        next_kw = cur_kw + 1 if cur_kw < 52 else 1
+        s_cur = _kw_score_single(cur_kw)
+        s_nxt = _kw_score_single(next_kw)
+        # Mittelwert der beiden Einzel-Scores, kaufmaennisch gerundet
+        avg_kw = (s_cur + s_nxt) / 2.0
+        if avg_kw >= 0.5:    kw_score = +1
+        elif avg_kw <= -0.5: kw_score = -1
+        else:                kw_score = 0
+
+    # --- Kombinieren, Cap bei [-2, +2] ---
+    return max(-2, min(+2, month_score + kw_score))
+
+def score_rates(diffs_df: pd.DataFrame, sym: str) -> int:
+    """Trend der Zinsdifferenz der letzten 90 Tage."""
+    pair = FUTURE_TO_PAIR.get(sym)
+    if pair is None or diffs_df.empty or pair not in diffs_df.columns:
+        return 0
+    sub = diffs_df[["date", pair]].dropna()
+    if len(sub) < 100: return 0
+    last = sub[pair].iloc[-1]
+    prev = sub[pair].iloc[-90]
+    delta = last - prev
+    if delta >= 0.5:   return +2
+    if delta >= 0.15:  return +1
+    if delta <= -0.5:  return -2
+    if delta <= -0.15: return -1
+    return 0
+
+def compute_bias(sym: str, cot_df, monthly_df, weekly_df, diffs_df) -> dict:
+    """Gibt dict mit Sub-Scores + Gesamt + Label zurueck."""
+    sub = cot_df[cot_df["symbol"] == sym].sort_values("report_date")
+    cot_idx = sub["cot_index_commercials_26w"].iloc[-1] if not sub.empty else np.nan
+    s_cot = score_cot(cot_idx)
+    s_sea = score_season(monthly_df, weekly_df, sym)
+    s_rat = score_rates(diffs_df, sym) if sym in FX_SYMBOLS else 0
+
+    if sym in FX_SYMBOLS:
+        total = s_cot + s_sea + s_rat
+    else:
+        total = s_cot * 2 + s_sea  # COT verdoppelt bei Nicht-FX
+
+    if   total >= 4:  label, css = "STARK BULLISH", "bias-bull-strong"
+    elif total >= 2:  label, css = "BULLISH",       "bias-bull"
+    elif total <= -4: label, css = "STARK BEARISH", "bias-bear-strong"
+    elif total <= -2: label, css = "BEARISH",       "bias-bear"
+    else:             label, css = "NEUTRAL",       "bias-neutral"
+
+    return {"cot": s_cot, "sea": s_sea, "rates": s_rat,
+            "total": total, "label": label, "css": css,
+            "is_fx": sym in FX_SYMBOLS}
+
+
+# -------------------------------------------------
+# Datenalter-Check
+# -------------------------------------------------
+def stale_warning(name: str, last_dt, max_days: int) -> str | None:
+    if last_dt is None: return f"{name}: keine Daten"
+    age = (datetime.now() - pd.Timestamp(last_dt)).days
+    if age > max_days:
+        return f"{name} ist <b>{age} Tage</b> alt (max {max_days})"
+    return None
+
+
+# -------------------------------------------------
+# Header
+# -------------------------------------------------
 st.markdown("## 📊 Trading Dashboard")
 
 cot_df = load_cot()
 seas   = load_seasonality()
 rates_wide, rate_diffs = load_rates()
+user_state = load_user_state()
 
 if cot_df.empty:
     st.error("Keine COT-Daten. Erst die Skripte in scripts/ ausführen.")
@@ -139,6 +323,7 @@ if cot_df.empty:
 
 last_cot  = cot_df["report_date"].max()
 last_rate = rates_wide.index.max() if not rates_wide.empty else None
+
 st.markdown(
     f"<div class='dashboard-header-meta'>"
     f"Letzter COT-Report: <b>{last_cot.date().strftime('%d.%m.%Y')}</b>  ·  "
@@ -149,33 +334,76 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Datenalter-Warnungen
+warns = []
+w1 = stale_warning("COT-Report", last_cot, 10)
+w2 = stale_warning("Zinsdaten", last_rate, 60)
+if w1: warns.append(w1)
+if w2: warns.append(w2)
+for w in warns:
+    st.markdown(f"<div class='warn-stale'>⚠️ {w}</div>", unsafe_allow_html=True)
+
+
+# -------------------------------------------------
+# Sidebar
+# -------------------------------------------------
 with st.sidebar:
-    st.markdown("### Auswahl")
+    st.markdown("### Markt-Auswahl")
     symbol = st.selectbox(
         "Markt", options=list(MARKET_NAMES.keys()),
         format_func=lambda s: f"{s} – {MARKET_NAMES[s]}", index=5,
     )
+
+    # Watchlist-Toggle für aktuelles Symbol
+    in_wl = symbol in user_state["watchlist"]
+    btn_label = "★ Aus Watchlist entfernen" if in_wl else "☆ In Watchlist aufnehmen"
+    if st.button(btn_label, use_container_width=True):
+        if in_wl:
+            user_state["watchlist"].remove(symbol)
+        else:
+            user_state["watchlist"].append(symbol)
+        save_user_state(user_state)
+        st.rerun()
+
+    # Watchlist-Anzeige
+    if user_state["watchlist"]:
+        st.markdown("**Watchlist:** " + " · ".join(
+            f"<span class='star'>★</span> {s}" for s in user_state["watchlist"]
+        ), unsafe_allow_html=True)
+
     st.divider()
     st.markdown("### COT-Optionen")
     group_label = st.radio("Trader-Gruppe",
                            options=list(GROUP_CHOICES.keys()), index=0)
     group_key = GROUP_CHOICES[group_label]
 
+    st.divider()
+    if st.button("🔄 Daten-Cache leeren", use_container_width=True,
+                 help="Liest die Parquet-Dateien neu ein (nach manuellem Update)."):
+        st.cache_data.clear()
+        st.rerun()
 
-def cockpit_card_html(sym, cot_df, seas_monthly):
+
+# -------------------------------------------------
+# Cockpit-Card-Helper
+# -------------------------------------------------
+def cockpit_card_html(sym, cot_df, seas_monthly, weekly_df, diffs_df, user_state) -> str:
     sub = cot_df[cot_df["symbol"] == sym].sort_values("report_date")
     if sub.empty:
         return f"<div class='cockpit-card'><div class='cockpit-symbol'>{sym}</div></div>"
     last = sub.iloc[-1]
     cot_idx = last.get("cot_index_commercials_26w", np.nan)
     net_chg = last.get("net_commercials_chg_abs", np.nan)
+
     arrow = "▲" if pd.notna(net_chg) and net_chg > 0 else ("▼" if pd.notna(net_chg) and net_chg < 0 else "·")
     arrow_color = "#4ADE80" if arrow == "▲" else ("#F87171" if arrow == "▼" else "#9aa0ad")
+
     if pd.notna(cot_idx):
         cls = "cot-low" if cot_idx <= 20 else ("cot-high" if cot_idx >= 80 else "cot-mid")
         cot_str = f"<span class='{cls}'>{cot_idx:.0f}</span>"
     else:
         cot_str = "<span class='cot-mid'>–</span>"
+
     seas_str = "–"
     if not seas_monthly.empty:
         m = seas_monthly[seas_monthly["symbol"] == sym]
@@ -185,11 +413,17 @@ def cockpit_card_html(sym, cot_df, seas_monthly):
             if pd.notna(avg):
                 color = "#4ADE80" if avg > 0 else "#F87171"
                 seas_str = f"<span style='color:{color}'>{avg:+.2f}%</span>"
+
+    bias = compute_bias(sym, cot_df, seas_monthly, weekly_df, diffs_df)
+    star = "<span class='star'>★</span> " if sym in user_state["watchlist"] else ""
+
     return (
         f"<div class='cockpit-card'>"
-        f"<div class='cockpit-symbol'>{sym}</div>"
+        f"<div class='cockpit-symbol'>{star}{sym}</div>"
         f"<div class='cockpit-name'>{MARKET_NAMES[sym]}</div>"
-        f"<div class='cockpit-row'><span class='lbl'>COT-Idx 26W (Comm)</span>"
+        f"<div class='cockpit-row'><span class='lbl'>Bias</span>"
+        f"<span class='val'><span class='bias-pill {bias['css']}'>{bias['label']}</span></span></div>"
+        f"<div class='cockpit-row'><span class='lbl'>COT 26W</span>"
         f"<span class='val'>{cot_str}</span></div>"
         f"<div class='cockpit-row'><span class='lbl'>Net-Trend</span>"
         f"<span class='val' style='color:{arrow_color}'>{arrow}</span></div>"
@@ -199,19 +433,59 @@ def cockpit_card_html(sym, cot_df, seas_monthly):
     )
 
 
-tab_over, tab_cot, tab_seas, tab_rates = st.tabs(
-    ["🧭 Übersicht", "📈 COT-Daten", "🗓️ Saisonalität", "💰 Zinsen"]
+# -------------------------------------------------
+# TABS
+# -------------------------------------------------
+tab_over, tab_cot, tab_seas, tab_rates, tab_notes = st.tabs(
+    ["🧭 Übersicht", "📈 COT-Daten", "🗓️ Saisonalität", "💰 Zinsen", "📝 Notizen"]
 )
 
 
+# =================================================
+# TAB 0: Übersicht
+# =================================================
 with tab_over:
-    st.caption("Schneller Überblick über alle 10 Märkte. Farbcode COT-Index 26W (Commercials):  🟢 ≤ 20  ·  🔴 ≥ 80  ·  weiß = neutral.")
+    st.caption(
+        "Schneller Überblick. Bias = automatischer 4-Säulen-Score "
+        "(COT · Saisonalität · Zinsen). ★ = auf der Watchlist."
+    )
     syms = list(MARKET_NAMES.keys())
     cols = st.columns(5)
     for i, sym in enumerate(syms):
         with cols[i % 5]:
-            st.markdown(cockpit_card_html(sym, cot_df, seas["monthly"]), unsafe_allow_html=True)
+            st.markdown(
+                cockpit_card_html(sym, cot_df, seas["monthly"], seas["weekly"], rate_diffs, user_state),  
+                unsafe_allow_html=True,
+            )
+
     st.divider()
+
+    # Bias-Tabelle (Detail)
+    st.markdown("##### Bias-Details (alle Märkte)")
+    rows = []
+    for sym in syms:
+        b = compute_bias(sym, cot_df, seas["monthly"], seas["weekly"], rate_diffs)
+        rows.append({
+            "★": "★" if sym in user_state["watchlist"] else "",
+            "Symbol": sym,
+            "Markt": MARKET_NAMES[sym],
+            "COT": b["cot"],
+            "Saison": b["sea"],
+            "Zinsen": b["rates"] if b["is_fx"] else "—",
+            "Total": b["total"],
+            "Bias": b["label"],
+        })
+    bias_df = pd.DataFrame(rows)
+
+    def _color_bias(val):
+        if "BULL" in str(val):  return "color:#4ADE80; font-weight:700"
+        if "BEAR" in str(val):  return "color:#F87171; font-weight:700"
+        return "color:#9aa0ad"
+    st.dataframe(
+        bias_df.style.map(_color_bias, subset=["Bias"]),
+        use_container_width=True, hide_index=True,
+    )
+
     if not rate_diffs.empty:
         st.markdown("##### Aktuelle Carry-Übersicht (FX-Paare)")
         last = rate_diffs.iloc[-1]
@@ -225,6 +499,9 @@ with tab_over:
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
+# =================================================
+# TAB 1: COT
+# =================================================
 with tab_cot:
     df_m = cot_df[cot_df["symbol"] == symbol].sort_values("report_date").reset_index(drop=True)
     latest = df_m.iloc[-1]
@@ -267,15 +544,15 @@ with tab_cot:
         subplot_titles=(f"Net Position – {group_label}",
                         f"COT-Index 26W & 156W – {group_label}"))
     fig.add_trace(go.Scatter(x=df_m["report_date"], y=df_m[net_col],
-                             mode="lines", name="Net Position",
-                             line=dict(width=1.5, color="#FFB000")), row=1, col=1)
+        mode="lines", name="Net Position",
+        line=dict(width=1.5, color="#FFB000")), row=1, col=1)
     fig.add_hline(y=0, line_dash="dot", line_width=1, opacity=0.5, row=1, col=1)
     fig.add_trace(go.Scatter(x=df_m["report_date"], y=df_m[idx26_col],
-                             mode="lines", name="COT-Index 26W",
-                             line=dict(width=1.8, color="#FFB000")), row=2, col=1)
+        mode="lines", name="COT-Index 26W",
+        line=dict(width=1.8, color="#FFB000")), row=2, col=1)
     fig.add_trace(go.Scatter(x=df_m["report_date"], y=df_m[idx156_col],
-                             mode="lines", name="COT-Index 156W",
-                             line=dict(width=1.2, dash="dot", color="#29BEFD"), opacity=0.7), row=2, col=1)
+        mode="lines", name="COT-Index 156W",
+        line=dict(width=1.2, dash="dot", color="#29BEFD"), opacity=0.7), row=2, col=1)
     fig.add_hline(y=20, line_dash="dash", line_width=1, opacity=0.4, row=2, col=1)
     fig.add_hline(y=80, line_dash="dash", line_width=1, opacity=0.4, row=2, col=1)
     fig.update_yaxes(title_text="Kontrakte", row=1, col=1)
@@ -293,6 +570,9 @@ with tab_cot:
     st.dataframe(recent.iloc[::-1], use_container_width=True, hide_index=True)
 
 
+# =================================================
+# TAB 2: Saisonalität
+# =================================================
 with tab_seas:
     st.subheader(f"{symbol} – {MARKET_NAMES[symbol]}  ·  Saisonalität")
     monthly = seas["monthly"]; weekly = seas["weekly"]; curve = seas["curve"]
@@ -373,14 +653,10 @@ with tab_seas:
             "Ø Return %":"{:+.2f}", "Median %":"{:+.2f}", "Trefferquote %":"{:.0f}",
         }), use_container_width=True, hide_index=True, height=520)
 
-        cur_avg = stats_m.loc[stats_m["Monat"]==cur_month_label, "Ø Return %"].iloc[0]
-        cur_hit = stats_m.loc[stats_m["Monat"]==cur_month_label, "Trefferquote %"].iloc[0]
-        if cur_avg > 0:
-            st.success(f"**{cur_month_label}** ist für {symbol} historisch **positiv** (Ø {cur_avg:+.2f}%, Trefferquote {cur_hit:.0f}%).")
-        else:
-            st.warning(f"**{cur_month_label}** ist für {symbol} historisch **negativ** (Ø {cur_avg:+.2f}%, Trefferquote {cur_hit:.0f}%).")
 
-
+# =================================================
+# TAB 3: Zinsen
+# =================================================
 with tab_rates:
     if rates_wide.empty or rate_diffs.empty:
         st.error("Zins-Daten fehlen.")
@@ -434,7 +710,7 @@ with tab_rates:
         st.dataframe(df_diffs.style.apply(_hl_pair, axis=1), use_container_width=True, hide_index=True)
 
         if active_pair is None:
-            st.info(f"Aktuell ist **{symbol} ({MARKET_NAMES[symbol]})** ausgewählt – kein FX-Future. Wähle 6E/6B/6J/6A/6C in der Sidebar für den passenden Verlauf.")
+            st.info(f"Aktuell ist **{symbol} ({MARKET_NAMES[symbol]})** ausgewählt – kein FX-Future.")
         else:
             st.markdown(f"##### Verlauf der Zinsdifferenz: **{active_pair}** (passend zu {symbol})")
             fig_d = go.Figure()
@@ -448,11 +724,47 @@ with tab_rates:
                 hovermode="x unified",
                 plot_bgcolor="#0E1117", paper_bgcolor="#0E1117", font=dict(color="#E6E8EE"))
             st.plotly_chart(fig_d, use_container_width=True)
-            v = last[active_pair]
-            if pd.notna(v):
-                if v > 0.5:
-                    st.success(f"**{active_pair}** Zinsdifferenz **{v:+.2f}%** → deutlicher Carry-Vorteil zugunsten **{active_pair[:3]}**.")
-                elif v < -0.5:
-                    st.error(f"**{active_pair}** Zinsdifferenz **{v:+.2f}%** → deutlicher Carry-Vorteil zugunsten **{active_pair[3:]}**.")
-                else:
-                    st.info(f"**{active_pair}** Zinsdifferenz **{v:+.2f}%** → neutraler Bereich.")
+
+
+## =================================================
+# TAB 4: Notizen
+# =================================================
+with tab_notes:
+    st.subheader(f"📝 Notiz für {symbol} – {MARKET_NAMES[symbol]}")
+    st.caption("Persistent gespeichert in data/processed/user_state.json. Wird nicht zu GitHub hochgeladen.")
+
+    bias = compute_bias(symbol, cot_df, seas["monthly"], seas["weekly"], rate_diffs)
+    rates_part = "—" if not bias["is_fx"] else f"{bias['rates']:+d}"
+    st.markdown(
+        f"<b>Aktueller Bias:</b> "
+        f"<span class='bias-pill {bias['css']}'>{bias['label']}</span>  "
+        f"<span class='muted'>(COT {bias['cot']:+d}, Saison {bias['sea']:+d}, "
+        f"Zinsen {rates_part}, Total {bias['total']:+d})</span>",
+        unsafe_allow_html=True,
+    )
+
+    current_note = user_state["notes"].get(symbol, "")
+    new_note = st.text_area(
+        "Notiz / Trade-Plan / Beobachtungen",
+        value=current_note, height=240,
+        placeholder="z.B. Long-Setup ab 1.0850 mit Stop unter 1.0780. COT seit 3 Wochen drehend, Saison spricht für Mai-Stärke...",
+    )
+    col_a, col_b = st.columns([1, 4])
+    with col_a:
+        if st.button("💾 Speichern", use_container_width=True):
+            user_state["notes"][symbol] = new_note
+            save_user_state(user_state)
+            st.success("Gespeichert.")
+    with col_b:
+        last_saved = user_state["notes"].get(symbol, "")
+        if last_saved:
+            st.caption(f"Letzter gespeicherter Stand: {len(last_saved)} Zeichen.")
+
+    if user_state["notes"]:
+        st.divider()
+        st.markdown("##### Alle gespeicherten Notizen")
+        for sym in sorted(user_state["notes"].keys()):
+            note = user_state["notes"][sym]
+            if note.strip():
+                with st.expander(f"{sym} – {MARKET_NAMES.get(sym, sym)}  ({len(note)} Zeichen)"):
+                    st.write(note)
