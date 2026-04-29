@@ -1,0 +1,72 @@
+name: Update Trading Data
+
+# Wann der Roboter laufen soll
+on:
+  # Taeglich um 07:00 UTC (= 09:00 Berlin im Sommer, 08:00 im Winter)
+  schedule:
+    - cron: '0 7 * * *'
+  # Manueller Trigger ueber den GitHub-UI-Button "Run workflow"
+  workflow_dispatch:
+
+# Berechtigungen, damit der Roboter zurueck ins Repo committen darf
+permissions:
+  contents: write
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # 1) Repository auschecken
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2) Python einrichten
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # 3) Pakete installieren
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 4) COT-Daten holen und Index berechnen
+      - name: Fetch COT data
+        run: python scripts/fetch_cot.py
+
+      - name: Compute COT index
+        run: python scripts/compute_cot_index.py
+
+      # 5) Preise holen und Saisonalitaet berechnen
+      - name: Fetch prices
+        run: python scripts/fetch_prices.py
+
+      - name: Compute seasonality
+        run: python scripts/compute_seasonality.py
+
+      # 6) Zinsen holen und Differenzen berechnen
+      - name: Fetch interest rates
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: python scripts/fetch_rates.py
+
+      - name: Compute rate differentials
+        run: python scripts/compute_rate_diffs.py
+
+      # 7) Aenderungen ins Repo zurueck-committen
+      - name: Commit and push updated data
+        run: |
+          git config --local user.email "actions@github.com"
+          git config --local user.name "GitHub Actions Bot"
+          git add data/raw/*.parquet data/raw/prices/*.parquet data/processed/*.parquet
+          # Nur committen, wenn sich wirklich was geaendert hat
+          if git diff --staged --quiet; then
+            echo "Keine Aenderungen, nichts zu committen."
+          else
+            git commit -m "Auto-Update: Daten vom $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git push
+          fi
