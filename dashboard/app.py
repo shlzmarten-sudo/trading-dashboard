@@ -126,10 +126,12 @@ GROUP_CHOICES = {
     "Small Speculators": "small_specs",
 }
 MARKET_NAMES = {
-    "6E": "Euro FX", "6B": "British Pound", "6J": "Japanese Yen",
-    "6A": "Australian Dollar", "6C": "Canadian Dollar",
-    "GC": "Gold", "SI": "Silver", "CL": "WTI Crude Oil",
-    "ES": "E-mini S&P 500", "NQ": "E-mini Nasdaq-100",
+    "6E": "Euro FX",
+    "6B": "British Pound",
+    "6J": "Japanese Yen",
+    "6A": "Australian Dollar",
+    "6C": "Canadian Dollar",
+    "GC": "Gold",
 }
 FX_SYMBOLS = {"6E", "6B", "6J", "6A", "6C"}
 FUTURE_TO_PAIR = {
@@ -184,6 +186,14 @@ def load_rates():
     if not wide.empty: wide.index = pd.to_datetime(wide.index)
     if not diffs.empty: diffs["date"] = pd.to_datetime(diffs["date"])
     return wide, diffs
+
+@st.cache_data(ttl=600)
+def load_gold_drivers():
+    p = Path("data/processed/gold_drivers.parquet")
+    if not p.exists(): return pd.DataFrame()
+    df = pd.read_parquet(p)
+    df["date"] = pd.to_datetime(df["date"])
+    return df
 
 
 # -------------------------------------------------
@@ -272,18 +282,71 @@ def score_rates(diffs_df: pd.DataFrame, sym: str) -> int:
     if delta <= -0.15: return -1
     return 0
 
-def compute_bias(sym: str, cot_df, monthly_df, weekly_df, diffs_df) -> dict:
-    """Gibt dict mit Sub-Scores + Gesamt + Label zurueck."""
+def score_gold_drivers(gd_df: pd.DataFrame) -> int:
+    """Bias-Score für Gold-Treiber: Kombiniert DXY und Realzins.
+    Beide korrelieren historisch negativ mit Gold.
+    Fallender DXY oder fallender Realzins -> bullisch für Gold."""
+    if gd_df.empty: return 0
+    last = gd_df.dropna().iloc[-1]
+    d_dxy = last.get("dxy_chg_90d", float('nan'))
+    d_ry  = last.get("real_yield_chg_90d", float('nan'))
+
+    # DXY-Sub-Score (negative Korrelation zu Gold -> Vorzeichen umdrehen)
+    if pd.isna(d_dxy):    s_dxy = 0
+    elif d_dxy <= -2.0:   s_dxy = +2
+    elif d_dxy <= -0.5:   s_dxy = +1
+    elif d_dxy >=  2.0:   s_dxy = -2
+    elif d_dxy >=  0.5:   s_dxy = -1
+    else:                 s_dxy = 0
+
+    # Realzins-Sub-Score (negative Korrelation zu Gold)
+    if pd.isna(d_ry):     s_ry = 0
+    elif d_ry <= -0.25:   s_ry = +2
+    elif d_ry <= -0.10:   s_ry = +1
+    elif d_ry >=  0.25:   s_ry = -2
+    elif d_ry >=  0.10:   s_ry = -1
+    else:                 s_ry = 0
+
+    # Mittelwert, kaufmaennisch gerundet, Cap bei [-2, +2]
+    avg = (s_dxy + s_ry) / 2.0
+    if avg >= 1.5:    return +2
+    if avg >= 0.5:    return +1
+    if avg <= -1.5:   return -2
+    if avg <= -0.5:   return -1
+    return 0
+
+
+def compute_bias(sym: str, cot_df, monthly_df, weekly_df, diffs_df, gold_drivers_df) -> dict:
+    """Bias-Score basiert auf:
+       FX (5 Märkte): COT + Saison + Zinsdifferenz
+       Gold:           COT + Saison + Gold-Treiber (DXY + Realzins)"""
     sub = cot_df[cot_df["symbol"] == sym].sort_values("report_date")
     cot_idx = sub["cot_index_commercials_26w"].iloc[-1] if not sub.empty else np.nan
     s_cot = score_cot(cot_idx)
     s_sea = score_season(monthly_df, weekly_df, sym)
-    s_rat = score_rates(diffs_df, sym) if sym in FX_SYMBOLS else 0
 
     if sym in FX_SYMBOLS:
-        total = s_cot + s_sea + s_rat
+        s_third = score_rates(diffs_df, sym)
+        third_label = "Zinsen"
+    elif sym == "GC":
+        s_third = score_gold_drivers(gold_drivers_df)
+        third_label = "Gold-Treiber"
     else:
-        total = s_cot * 2 + s_sea  # COT verdoppelt bei Nicht-FX
+        s_third = 0
+        third_label = "—"
+
+    total = s_cot + s_sea + s_third
+
+    if   total >= 4:  label, css = "STARK BULLISH", "bias-bull-strong"
+    elif total >= 2:  label, css = "BULLISH",       "bias-bull"
+    elif total <= -4: label, css = "STARK BEARISH", "bias-bear-strong"
+    elif total <= -2: label, css = "BEARISH",       "bias-bear"
+    else:             label, css = "NEUTRAL",       "bias-neutral"
+
+    return {"cot": s_cot, "sea": s_sea, "rates": s_third,
+            "third_label": third_label,
+            "total": total, "label": label, "css": css,
+            "is_fx": sym in FX_SYMBOLS, "is_gold": sym == "GC"}
 
     if   total >= 4:  label, css = "STARK BULLISH", "bias-bull-strong"
     elif total >= 2:  label, css = "BULLISH",       "bias-bull"
@@ -315,6 +378,7 @@ st.markdown("## 📊 Trading Dashboard")
 cot_df = load_cot()
 seas   = load_seasonality()
 rates_wide, rate_diffs = load_rates()
+gold_drivers = load_gold_drivers()
 user_state = load_user_state()
 
 if cot_df.empty:
@@ -387,7 +451,7 @@ with st.sidebar:
 # -------------------------------------------------
 # Cockpit-Card-Helper
 # -------------------------------------------------
-def cockpit_card_html(sym, cot_df, seas_monthly, weekly_df, diffs_df, user_state) -> str:
+def cockpit_card_html(sym, cot_df, seas_monthly, weekly_df, diffs_df, gold_drivers_df, user_state) -> str:
     sub = cot_df[cot_df["symbol"] == sym].sort_values("report_date")
     if sub.empty:
         return f"<div class='cockpit-card'><div class='cockpit-symbol'>{sym}</div></div>"
@@ -414,7 +478,7 @@ def cockpit_card_html(sym, cot_df, seas_monthly, weekly_df, diffs_df, user_state
                 color = "#4ADE80" if avg > 0 else "#F87171"
                 seas_str = f"<span style='color:{color}'>{avg:+.2f}%</span>"
 
-    bias = compute_bias(sym, cot_df, seas_monthly, weekly_df, diffs_df)
+    bias = compute_bias(sym, cot_df, seas_monthly, weekly_df, diffs_df, gold_drivers_df)
     star = "<span class='star'>★</span> " if sym in user_state["watchlist"] else ""
 
     return (
@@ -437,7 +501,7 @@ def cockpit_card_html(sym, cot_df, seas_monthly, weekly_df, diffs_df, user_state
 # TABS
 # -------------------------------------------------
 tab_over, tab_cot, tab_seas, tab_rates, tab_notes = st.tabs(
-    ["🧭 Übersicht", "📈 COT-Daten", "🗓️ Saisonalität", "💰 Zinsen", "📝 Notizen"]
+    ["🧭 Übersicht", "📈 COT-Daten", "🗓️ Saisonalität", "💰 Zinsen / Gold-Treiber", "📝 Notizen"]
 )
 
 
@@ -454,7 +518,7 @@ with tab_over:
     for i, sym in enumerate(syms):
         with cols[i % 5]:
             st.markdown(
-                cockpit_card_html(sym, cot_df, seas["monthly"], seas["weekly"], rate_diffs, user_state),  
+                cockpit_card_html(sym, cot_df, seas["monthly"], seas["weekly"], rate_diffs, gold_drivers, user_state), 
                 unsafe_allow_html=True,
             )
 
@@ -464,14 +528,14 @@ with tab_over:
     st.markdown("##### Bias-Details (alle Märkte)")
     rows = []
     for sym in syms:
-        b = compute_bias(sym, cot_df, seas["monthly"], seas["weekly"], rate_diffs)
+        b = compute_bias(sym, cot_df, seas["monthly"], seas["weekly"], rate_diffs, gold_drivers)
         rows.append({
             "★": "★" if sym in user_state["watchlist"] else "",
             "Symbol": sym,
             "Markt": MARKET_NAMES[sym],
             "COT": b["cot"],
             "Saison": b["sea"],
-            "Zinsen": b["rates"] if b["is_fx"] else "—",
+            "Zinsen / Treiber": b["rates"] if (b["is_fx"] or b["is_gold"]) else "—",
             "Total": b["total"],
             "Bias": b["label"],
         })
@@ -655,75 +719,168 @@ with tab_seas:
 
 
 # =================================================
-# TAB 3: Zinsen
+# TAB 3: Zinsen / Gold-Treiber
 # =================================================
 with tab_rates:
-    if rates_wide.empty or rate_diffs.empty:
-        st.error("Zins-Daten fehlen.")
+    # GOLD: zeigt DXY + Realzins statt FX-Zinsen
+    if symbol == "GC":
+        st.subheader("Gold-Treiber: DXY + US-Realzins 10Y")
+
+        if gold_drivers.empty:
+            st.error("Gold-Treiber-Daten fehlen. Erst `python scripts/fetch_gold_drivers.py` ausführen.")
+        else:
+            last = gold_drivers.dropna().iloc[-1]
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.metric("DXY", f"{last['dxy']:.2f}",
+                          delta=f"{last['dxy_chg_90d']:+.2f} (90d)",
+                          delta_color="inverse",
+                          help="US Dollar Index. Negativer Trend = bullisch für Gold.")
+            with c2:
+                st.metric("Realzins 10Y", f"{last['real_yield']:+.2f}%",
+                          delta=f"{last['real_yield_chg_90d']:+.2f} pp (90d)",
+                          delta_color="inverse",
+                          help="TIPS-implizierte 10J-Realrendite. Negativer Trend = bullisch für Gold.")
+            with c3:
+                # Schnell-Einordnung DXY
+                d_dxy = last["dxy_chg_90d"]
+                if d_dxy <= -2.0:   d_lbl, d_col = "USD schwach", "#4ADE80"
+                elif d_dxy <= -0.5: d_lbl, d_col = "USD leicht schwach", "#86EFAC"
+                elif d_dxy >= 2.0:  d_lbl, d_col = "USD stark", "#F87171"
+                elif d_dxy >= 0.5:  d_lbl, d_col = "USD leicht stark", "#FCA5A5"
+                else:               d_lbl, d_col = "USD seitwärts", "#9aa0ad"
+                st.markdown(
+                    f"<div style='padding-top:18px'><div style='font-size:0.72rem;"
+                    f"text-transform:uppercase;letter-spacing:1px;opacity:0.75'>USD-Trend (90d)</div>"
+                    f"<div style='font-size:1.4rem;font-weight:600;color:{d_col};"
+                    f"font-family:ui-monospace,monospace'>{d_lbl}</div></div>",
+                    unsafe_allow_html=True,
+                )
+            with c4:
+                # Schnell-Einordnung Realzins
+                d_ry = last["real_yield_chg_90d"]
+                if d_ry <= -0.25:   r_lbl, r_col = "Real fällt", "#4ADE80"
+                elif d_ry <= -0.10: r_lbl, r_col = "Real leicht ↓", "#86EFAC"
+                elif d_ry >= 0.25:  r_lbl, r_col = "Real steigt", "#F87171"
+                elif d_ry >= 0.10:  r_lbl, r_col = "Real leicht ↑", "#FCA5A5"
+                else:               r_lbl, r_col = "Real seitwärts", "#9aa0ad"
+                st.markdown(
+                    f"<div style='padding-top:18px'><div style='font-size:0.72rem;"
+                    f"text-transform:uppercase;letter-spacing:1px;opacity:0.75'>Realzins-Trend (90d)</div>"
+                    f"<div style='font-size:1.4rem;font-weight:600;color:{r_col};"
+                    f"font-family:ui-monospace,monospace'>{r_lbl}</div></div>",
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown("##### DXY-Verlauf seit 2008")
+            fig_dxy = go.Figure()
+            fig_dxy.add_trace(go.Scatter(
+                x=gold_drivers["date"], y=gold_drivers["dxy"],
+                mode="lines", name="DXY",
+                line=dict(width=1.6, color="#FFB000"),
+                hovertemplate="%{x|%d.%m.%Y}<br>%{y:.2f}<extra></extra>",
+            ))
+            fig_dxy.update_layout(
+                height=320, margin=dict(l=10, r=10, t=10, b=10),
+                yaxis=dict(title="DXY"),
+                hovermode="x unified",
+                plot_bgcolor="#0E1117", paper_bgcolor="#0E1117",
+                font=dict(color="#E6E8EE"),
+            )
+            st.plotly_chart(fig_dxy, use_container_width=True)
+
+            st.markdown("##### US-Realzins 10Y (TIPS) seit 2008")
+            fig_ry = go.Figure()
+            fig_ry.add_trace(go.Scatter(
+                x=gold_drivers["date"], y=gold_drivers["real_yield"],
+                mode="lines", name="Realzins 10Y",
+                line=dict(width=1.6, color="#29BEFD"),
+                hovertemplate="%{x|%d.%m.%Y}<br>%{y:+.2f}%<extra></extra>",
+            ))
+            fig_ry.add_hline(y=0, line_dash="dot", line_width=1, opacity=0.5)
+            fig_ry.update_layout(
+                height=320, margin=dict(l=10, r=10, t=10, b=10),
+                yaxis=dict(title="Realzins 10Y (%)"),
+                hovermode="x unified",
+                plot_bgcolor="#0E1117", paper_bgcolor="#0E1117",
+                font=dict(color="#E6E8EE"),
+            )
+            st.plotly_chart(fig_ry, use_container_width=True)
+
+            st.caption(
+                "**Lesart:** DXY und Realzins sind die zwei stärksten fundamentalen Treiber für Gold. "
+                "Beide korrelieren historisch **negativ** mit dem Goldpreis (~−0.85 für Realzins). "
+                "Fallender DXY oder fallender Realzins = bullisch für Gold."
+            )
+
+    # FX-MÄRKTE: bisheriger Zinsen-Tab
     else:
-        st.subheader("Aktuelle Leitzinsen")
-        latest_rates = rates_wide.iloc[-1]
-        if len(rates_wide) > 252:
-            yoy = rates_wide.iloc[-1] - rates_wide.iloc[-252]
+        if rates_wide.empty or rate_diffs.empty:
+            st.error("Zins-Daten fehlen.")
         else:
-            yoy = pd.Series([np.nan]*len(latest_rates), index=latest_rates.index)
-        cols = st.columns(6)
-        for i, cb in enumerate(CB_ORDER):
-            with cols[i]:
-                if cb in latest_rates.index and pd.notna(latest_rates[cb]):
-                    st.metric(CB_LABELS[cb], f"{latest_rates[cb]:.2f}%",
-                              delta=f"{yoy[cb]:+.2f}% vs. 1J" if pd.notna(yoy[cb]) else None,
-                              delta_color="off")
-                else:
-                    st.metric(CB_LABELS[cb], "n/a")
+            st.subheader("Aktuelle Leitzinsen")
+            latest_rates = rates_wide.iloc[-1]
+            if len(rates_wide) > 252:
+                yoy = rates_wide.iloc[-1] - rates_wide.iloc[-252]
+            else:
+                yoy = pd.Series([np.nan]*len(latest_rates), index=latest_rates.index)
+            cols = st.columns(6)
+            for i, cb in enumerate(CB_ORDER):
+                with cols[i]:
+                    if cb in latest_rates.index and pd.notna(latest_rates[cb]):
+                        st.metric(CB_LABELS[cb], f"{latest_rates[cb]:.2f}%",
+                                  delta=f"{yoy[cb]:+.2f}% vs. 1J" if pd.notna(yoy[cb]) else None,
+                                  delta_color="off")
+                    else:
+                        st.metric(CB_LABELS[cb], "n/a")
 
-        st.subheader("Historischer Verlauf der Leitzinsen")
-        palette = ["#FFB000","#29BEFD","#A259EA","#47E6C1","#F757C1","#78D64B"]
-        fig_r = go.Figure()
-        for i, cb in enumerate(CB_ORDER):
-            if cb in rates_wide.columns:
-                fig_r.add_trace(go.Scatter(x=rates_wide.index, y=rates_wide[cb],
-                    mode="lines", name=CB_LABELS[cb],
-                    line=dict(width=1.6, color=palette[i % len(palette)])))
-        fig_r.add_hline(y=0, line_dash="dot", line_width=1, opacity=0.4)
-        fig_r.update_layout(height=420, margin=dict(l=10, r=10, t=30, b=10),
-            yaxis=dict(title="Leitzins (%)"), xaxis=dict(title="Datum"),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            hovermode="x unified",
-            plot_bgcolor="#0E1117", paper_bgcolor="#0E1117", font=dict(color="#E6E8EE"))
-        st.plotly_chart(fig_r, use_container_width=True)
-
-        st.subheader("Aktuelle Zinsdifferenzen")
-        last = rate_diffs.iloc[-1]
-        rows = []
-        active_pair = FUTURE_TO_PAIR.get(symbol, None)
-        for fut, pair in FUTURE_TO_PAIR.items():
-            if pair in rate_diffs.columns:
-                v = last[pair]
-                if pd.notna(v):
-                    carry = pair[:3] if v > 0 else (pair[3:] if v < 0 else "—")
-                    rows.append({"Future": fut, "FX-Paar": pair,
-                                 "Zinsdifferenz": f"{v:+.2f}%", "Carry-Vorteil": carry})
-        df_diffs = pd.DataFrame(rows)
-        def _hl_pair(row):
-            return ["background-color: rgba(255,176,0,0.15)"]*len(row) if active_pair and row["FX-Paar"]==active_pair else [""]*len(row)
-        st.dataframe(df_diffs.style.apply(_hl_pair, axis=1), use_container_width=True, hide_index=True)
-
-        if active_pair is None:
-            st.info(f"Aktuell ist **{symbol} ({MARKET_NAMES[symbol]})** ausgewählt – kein FX-Future.")
-        else:
-            st.markdown(f"##### Verlauf der Zinsdifferenz: **{active_pair}** (passend zu {symbol})")
-            fig_d = go.Figure()
-            fig_d.add_trace(go.Scatter(x=rate_diffs["date"], y=rate_diffs[active_pair],
-                mode="lines", name=active_pair,
-                line=dict(width=1.8, color="#FFB000"),
-                hovertemplate="%{x|%d.%m.%Y}<br>%{y:+.2f}%<extra></extra>"))
-            fig_d.add_hline(y=0, line_dash="dot", line_width=1, opacity=0.5)
-            fig_d.update_layout(height=380, margin=dict(l=10, r=10, t=30, b=10),
-                yaxis=dict(title="Zinsdifferenz (%)"), xaxis=dict(title="Datum"),
+            st.subheader("Historischer Verlauf der Leitzinsen")
+            palette = ["#FFB000","#29BEFD","#A259EA","#47E6C1","#F757C1","#78D64B"]
+            fig_r = go.Figure()
+            for i, cb in enumerate(CB_ORDER):
+                if cb in rates_wide.columns:
+                    fig_r.add_trace(go.Scatter(x=rates_wide.index, y=rates_wide[cb],
+                        mode="lines", name=CB_LABELS[cb],
+                        line=dict(width=1.6, color=palette[i % len(palette)])))
+            fig_r.add_hline(y=0, line_dash="dot", line_width=1, opacity=0.4)
+            fig_r.update_layout(height=420, margin=dict(l=10, r=10, t=30, b=10),
+                yaxis=dict(title="Leitzins (%)"), xaxis=dict(title="Datum"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                 hovermode="x unified",
                 plot_bgcolor="#0E1117", paper_bgcolor="#0E1117", font=dict(color="#E6E8EE"))
-            st.plotly_chart(fig_d, use_container_width=True)
+            st.plotly_chart(fig_r, use_container_width=True)
+
+            st.subheader("Aktuelle Zinsdifferenzen")
+            last = rate_diffs.iloc[-1]
+            rows = []
+            active_pair = FUTURE_TO_PAIR.get(symbol, None)
+            for fut, pair in FUTURE_TO_PAIR.items():
+                if pair in rate_diffs.columns:
+                    v = last[pair]
+                    if pd.notna(v):
+                        carry = pair[:3] if v > 0 else (pair[3:] if v < 0 else "—")
+                        rows.append({"Future": fut, "FX-Paar": pair,
+                                     "Zinsdifferenz": f"{v:+.2f}%", "Carry-Vorteil": carry})
+            df_diffs = pd.DataFrame(rows)
+            def _hl_pair(row):
+                return ["background-color: rgba(255,176,0,0.15)"]*len(row) if active_pair and row["FX-Paar"]==active_pair else [""]*len(row)
+            st.dataframe(df_diffs.style.apply(_hl_pair, axis=1), use_container_width=True, hide_index=True)
+
+            if active_pair is None:
+                st.info(f"Aktuell ist **{symbol} ({MARKET_NAMES[symbol]})** ausgewählt – kein FX-Future.")
+            else:
+                st.markdown(f"##### Verlauf der Zinsdifferenz: **{active_pair}** (passend zu {symbol})")
+                fig_d = go.Figure()
+                fig_d.add_trace(go.Scatter(x=rate_diffs["date"], y=rate_diffs[active_pair],
+                    mode="lines", name=active_pair,
+                    line=dict(width=1.8, color="#FFB000"),
+                    hovertemplate="%{x|%d.%m.%Y}<br>%{y:+.2f}%<extra></extra>"))
+                fig_d.add_hline(y=0, line_dash="dot", line_width=1, opacity=0.5)
+                fig_d.update_layout(height=380, margin=dict(l=10, r=10, t=30, b=10),
+                    yaxis=dict(title="Zinsdifferenz (%)"), xaxis=dict(title="Datum"),
+                    hovermode="x unified",
+                    plot_bgcolor="#0E1117", paper_bgcolor="#0E1117", font=dict(color="#E6E8EE"))
+                st.plotly_chart(fig_d, use_container_width=True)
 
 
 ## =================================================
@@ -733,13 +890,13 @@ with tab_notes:
     st.subheader(f"📝 Notiz für {symbol} – {MARKET_NAMES[symbol]}")
     st.caption("Persistent gespeichert in data/processed/user_state.json. Wird nicht zu GitHub hochgeladen.")
 
-    bias = compute_bias(symbol, cot_df, seas["monthly"], seas["weekly"], rate_diffs)
-    rates_part = "—" if not bias["is_fx"] else f"{bias['rates']:+d}"
+    bias = compute_bias(symbol, cot_df, seas["monthly"], seas["weekly"], rate_diffs, gold_drivers)
+    rates_part = f"{bias['rates']:+d}" if (bias["is_fx"] or bias["is_gold"]) else "—"
     st.markdown(
         f"<b>Aktueller Bias:</b> "
         f"<span class='bias-pill {bias['css']}'>{bias['label']}</span>  "
         f"<span class='muted'>(COT {bias['cot']:+d}, Saison {bias['sea']:+d}, "
-        f"Zinsen {rates_part}, Total {bias['total']:+d})</span>",
+        f"{bias['third_label']} {rates_part}, Total {bias['total']:+d})</span>",
         unsafe_allow_html=True,
     )
 

@@ -56,6 +56,11 @@ jobs:
 
       - name: Compute rate differentials
         run: python scripts/compute_rate_diffs.py
+        # 7) Gold-Treiber: DXY + Realzins
+      - name: Fetch gold drivers
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: python scripts/fetch_gold_drivers.py
 
       # 7) Aenderungen ins Repo zurueck-committen
       - name: Commit and push updated data

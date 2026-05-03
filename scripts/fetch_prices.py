@@ -26,10 +26,7 @@ TICKERS = {
     "6A": "AUDUSD=X",   # AUD/USD Spot
     "6C": "CAD=X",      # USD/CAD Spot  (wird invertiert!)
     "GC": "GC=F",       # Gold Continuous Future
-    "SI": "SI=F",       # Silver Continuous Future
-    "CL": "CL=F",       # WTI Crude Oil Continuous Future
-    "ES": "ES=F",       # E-mini S&P 500 Continuous Future
-    "NQ": "NQ=F",       # E-mini Nasdaq-100 Continuous Future
+    
 }
 
 # Bei diesen Symbolen ist der Yahoo-Kurs aus der Sicht des USD,

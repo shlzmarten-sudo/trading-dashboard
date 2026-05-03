@@ -30,14 +30,11 @@ MARKETS = {
     "6A": {"name": "Australian Dollar","code": "232741"},
     "6C": {"name": "Canadian Dollar",  "code": "090741"},
     "GC": {"name": "Gold",             "code": "088691"},
-    "SI": {"name": "Silver",           "code": "084691"},
-    "CL": {"name": "WTI Crude Oil",    "code": "067651"},
-    "ES": {"name": "E-mini S&P 500",   "code": "13874A"},
-    "NQ": {"name": "E-mini Nasdaq-100","code": "209742"},
+    
 }
 
 # Maerkte, fuer die wir zusaetzlich den Disaggregated-Report wollen
-DISAGG_SYMBOLS = ["GC", "SI", "CL"]
+DISAGG_SYMBOLS = ["GC"]
 
 # Startdatum der Historie
 START_DATE = "2010-01-01"

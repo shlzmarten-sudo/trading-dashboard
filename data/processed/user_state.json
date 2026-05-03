@@ -1,4 +1,19 @@
 {
-  "watchlist": [],
-  "notes": {}
+  "watchlist": [
+    "6J",
+    "6A",
+    "GC"
+  ],
+  "notes": {
+    "6J": "COT: Index bei 100 seit langem, Netto Positionen bauen sich auf + large Specs sind Index niedrig und bauen short Positionen auf \n-> sehr starkes bullishes Zeichen \nSessionalität: auf Monatssicht bearish, nächsten Kalenderwochen primär bullish\n-> mixed Signal \nZinsen: FED senk Zinsen, BOJ bleibt konstant (zwei Zinssteigerungen prognostiziert; Zinsdifferenz sinkt über die letzten 1-2 Jahre.\n-> bullishes Zeichen \n\nVor allem durch COT und Zinsdifferenzentwicklung:\n-> bullishe Bias",
+    "6E": "COT: 75-> leicht angehobener neutraler Bereich + Netto Positionen sinken in letzten 3 Wochen \nSessionalität unklar \nZinsen: Zinsdifferenz wird kleiner-> Euro konstant, Dollar sinkt \n\nda COT und Sessi unklar, überwiegen Zinsen\n-> keine Bias",
+    "6B": "COT: 26WIndex bei ca.50 -> neutral; Netto Positionen steigen, jedoch nicht konstant \nSessioonalität: eher Bearish, jedoch Aprill bullish -> unklar \nZinsdifferenz stagniert \n\nAlle Aspekte unklar\n-> keine Bias",
+    "6A": "COT: Index bei 9 -> extrem bearish; Netto Short Postionen aufgebaut über längeren Zeitraum; large Specs sehr bullish  \n-> bearish \nSessionalität: nachten zwei KW bearish und durchschnittlicher Jahresverlauf in nachten Tagen weiter bearish. + kommender Monat bearish \nZinsen: RBA erhöht Zinsen, während FED abbaut. Zinsdifferenz wurde kleiner - -> + und dann größer mit kontinuierlichem Zuwachs \n-> eher bullish \n\nbearishe Bias mit Vorsicht ",
+    "6C": "COT: Index neutral; Nettopositionen leicht bullish\n-> neutral \nSessionalität: unklar \nZinsen: neuraler Verlauf von Zinsdifferenz; beide Zentralbanken sinken Zinsen\n\n-> neutrale Bias ",
+    "GC": "COT: Index 26W strak bullish bei 99; Anstieg gefolgt von Seitwärtsbewegung der Nettopositionen \n-> COT long \nSessionalität aktueller und Folgemonat bullish \n\nRealzins sinkt + DXY sinkt \n\n-> bullishe Bias ",
+    "SI": "COT: Index 26W strak bullish bei 88;  starker Anstieg der netto long Positionen \n-> COT long \nSessionalität aktueller und Folgemonat bullish + folgende drei Kalenderwochen bullish\n\n-> bullishe Bias",
+    "CL": "COT: Index neutral bis negativ, kommt aus vielen shoot Netto Positionen -> werden langsam geschlossen, potenzieller Trendwechsel-> abwarten\nSessionalität: kommenden Monate und KW bullish \n\n-> keine Bias, wegen COT",
+    "ES": "COT: Index und Netto Positionsverlauf komplett neutral \nSessionalität: bulliger Monat aktuell und folgender \n\n-> keine Bias wegen COT",
+    "NQ": "COT: Index hoch bei 81; Netto Long Positionen werden kontinuierlich aber langsam aufgebaut \nSessionalität: Folgende KW und Monate bullish \n\n-> semi bullish Bias "
+  }
 }
